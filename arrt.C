@@ -26,7 +26,9 @@
 #include<gd.h>
 
 #define EPS 1e-6f
-// Known at compile time to speed stuff up in core kernel
+
+// Know npolar at compile time to speed stuff up in core MOC kernel
+// This speedup is due to loop unrolling.
 #define NPOLAR 1
 
 using namespace std;
@@ -106,6 +108,21 @@ vector<T> operator+(const vector<T>& vecl, const vector<T>& vecr)
   for (unsigned i=0; i<vecl.size(); ++i)
     result[i] = vecl[i] + vecr[i];
   return result;
+}
+template<class T>
+vector<T> operator*(const vector<T>& vecl, const vector<T>& vecr)
+{
+  vector<T> result(vecl.size());
+  for (unsigned i=0; i<vecl.size(); ++i)
+    result[i] = vecl[i] * vecr[i];
+  return result;
+}
+template<class T>
+void dumpVector(const vector<T>& vec, const string fname)
+{
+  ofstream of(fname);
+  for (const T& x: vec) of << x << endl;
+  of.close();
 }
 
 // Printing of pairs of stuff
@@ -725,9 +742,6 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
                             (1.0f - expf(-tau));
           track_fluxes[p+g*npolar] -= delta_psi;
         }
-      for (unsigned p=0; p<npolar; ++p)
-        cell_distance_traveled[fsr_id] += segment_length / polarQuadrature.getSinTheta(p)
-          * polarQuadrature.getWeight(p);
     }
   }
 
@@ -764,7 +778,7 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
         }
       for (unsigned p=0; p<npolar; ++p)
         cell_distance_traveled[fsr_id] += segment_length / polarQuadrature.getSinTheta(p)
-          * polarQuadrature.getWeight(p);
+           * polarQuadrature.getWeight(p);
     }
   }
 }
@@ -1341,8 +1355,9 @@ int main(int argc, char* argv[])
   // Loop over active iterations
   float k_avg = 0.0;
   float k_sq_avg = 0.0;
+  vector<float> tmp_flux;
   vector<float> flux_result(solver.getFlux().size());
-  vector<float> flux_uncertainty(solver.getFlux().size());
+  vector<float> flux_sq(solver.getFlux().size());
   for (unsigned n=0; n < settings.nactive; ++n)
   {
     solver.scatter();
@@ -1371,10 +1386,17 @@ int main(int argc, char* argv[])
     solver.normalizeByRelativeTraversalDistance();
     solver.multiplyFlux(M_PI * 4.0f); // Done after the fact
     solver.addSourceToScalarFlux();
-  }
 
-  solver.dumpFluxes("flux.out");
-  solver.dumpFission("fission.out");
+    // Aggregate stochastic fluxes
+    tmp_flux = solver.getFlux();
+    normalizeVector(tmp_flux);
+    flux_result = 1.0f/(n+1.0f)*((float)n * flux_result + tmp_flux);
+    flux_sq = 1.0f/(n+1.0f)*((float)n * flux_sq + tmp_flux*tmp_flux);
+  }
+  cout << endl;
+
+  dumpVector(flux_result, "flux.out");
+  dumpVector(flux_sq, "fluxsq.out");
 
   FILE *pngout;
   string picFileName = "geometry.png";
