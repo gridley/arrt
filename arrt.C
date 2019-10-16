@@ -15,6 +15,7 @@
 #include<fstream>
 #include<functional>
 #include<iostream> 
+#include<iomanip>
 #include<map>
 #include<string>
 #include<sstream>
@@ -25,6 +26,8 @@
 #include<gd.h>
 
 #define EPS 1e-6f
+// Known at compile time to speed stuff up in core kernel
+#define NPOLAR 1
 
 using namespace std;
 namespace fs = experimental::filesystem;
@@ -74,6 +77,35 @@ void swappair(pair<T,T>& p)
   T tmp = p.first;
   p.first = p.second;
   p.second = tmp;
+}
+
+// Some operations on vectors that are already defined
+// on std::valarray, but I haven't played with that class
+// yet and am on a time crunch. As a result, I'm going with
+// what I know works.
+template<class T>
+void normalizeVector(vector<T>& vec)
+{
+  // Calculate L1 norm of the vector
+  T norm = 0;
+  for (T x: vec) norm += abs(x);
+  for (T& x: vec) x /= norm;
+}
+template<class T>
+vector<T> operator*(T fac, const vector<T>& vec)
+{
+  vector<T> result(vec.size());
+  for (unsigned i=0; i<vec.size(); ++i)
+    result[i] = fac * vec[i];
+  return result;
+}
+template<class T>
+vector<T> operator+(const vector<T>& vecl, const vector<T>& vecr)
+{
+  vector<T> result(vecl.size());
+  for (unsigned i=0; i<vecl.size(); ++i)
+    result[i] = vecl[i] + vecr[i];
+  return result;
 }
 
 // Printing of pairs of stuff
@@ -387,6 +419,7 @@ struct RunSettings
   unsigned raysperiteration;
   unsigned ninactive;
   unsigned nactive;
+  unsigned npolar;
 
   public:
     RunSettings(string inputfile);
@@ -413,6 +446,8 @@ RunSettings::RunSettings(string inputfile)
       instream >> nactive;
     else if (word == "ninactive")
       instream >> ninactive;
+    else if (word == "npolar")
+      instream >> npolar;
   }
   instream.close();
 }
@@ -504,6 +539,8 @@ class Solver2D
     void normalizeByRelativeTraversalDistance();
     void multiplyFlux(float x);
     void addSourceToScalarFlux();
+
+    const vector<float>& getFlux() const;
 };
 template<class G, class M, class Q>
 Solver2D<G, M, Q>::Solver2D(G geom, M materials, RunSettings setts) :
@@ -523,6 +560,9 @@ Solver2D<G, M, Q>::Solver2D(G geom, M materials, RunSettings setts) :
   fsr_crossing_ids(max_fsr_crossings)
 {
 }
+template <class G, class M, class Q>
+const vector<float>& Solver2D<G, M, Q>::getFlux() const { return fluxes; }
+
 template <class G, class M, class Q>
 void Solver2D<G, M, Q>::normalizeFlux()
 {
@@ -665,7 +705,6 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
     {
       int fsr_id = fsr_crossing_ids[s];
       float segment_length = fsr_crossing_lengths[s];
-      cell_distance_traveled[fsr_id] += segment_length;
       dead_length_remaining -= segment_length;
       total_distance_remaining -= segment_length;
       if (segment_length == 0.0f) continue;
@@ -686,6 +725,9 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
                             (1.0f - expf(-tau));
           track_fluxes[p+g*npolar] -= delta_psi;
         }
+      for (unsigned p=0; p<npolar; ++p)
+        cell_distance_traveled[fsr_id] += segment_length / polarQuadrature.getSinTheta(p)
+          * polarQuadrature.getWeight(p);
     }
   }
 
@@ -698,10 +740,8 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
     {
       int fsr_id = fsr_crossing_ids[s];
       float segment_length = fsr_crossing_lengths[s];
-      cell_distance_traveled[fsr_id] += segment_length;
+      total_distance_remaining -= segment_length;
       if (segment_length == 0.0f) continue;
-
-      // lookup material
       string matname;
       if (geometry.inside_fuel(fsr_id))
         matname = "fuel";
@@ -719,16 +759,12 @@ void Solver2D<G, M, Q>::run_ray(Pt2D x0, float phi, unsigned ray_id)
                             (fiss_source[scalar_flux_index] +
                              scat_source[scalar_flux_index])/(pi4*sigmat[g]))*
                             (1.0f - expf(-tau));
-          if (live)
-            fluxes[scalar_flux_index] += delta_psi / sigmat[g];
+          fluxes[scalar_flux_index] += delta_psi / sigmat[g] * polarQuadrature.getWeight(p);
           track_fluxes[p+g*npolar] -= delta_psi;
         }
-      if (not live)
-      {
-        dead_length_remaining -= segment_length;
-        if (dead_length_remaining < 0.0f) live = true;
-      }
-      total_distance_remaining -= segment_length;
+      for (unsigned p=0; p<npolar; ++p)
+        cell_distance_traveled[fsr_id] += segment_length / polarQuadrature.getSinTheta(p)
+          * polarQuadrature.getWeight(p);
     }
   }
 }
@@ -1223,7 +1259,7 @@ int main(int argc, char* argv[])
 
   Solver2D<SquarePinGeom,
     FiniteMaterialSet,
-    TabuchiYamamoto<1>> solver(geom,
+    TabuchiYamamoto<NPOLAR>> solver(geom,
                                materials,
                                settings);
 
@@ -1233,6 +1269,13 @@ int main(int argc, char* argv[])
 
   // Delete old track file
   remove("tracks");
+
+  // Check that npolar given in input matches compile time value
+  if (NPOLAR != settings.npolar)
+  {
+    cerr << "recompile if you want to change npolar" << endl;
+    exit(1);
+  }
 
   // Set point source for testing (group 0 flux in FSR 364).
   // This gets the iterations moving.
@@ -1248,7 +1291,6 @@ int main(int argc, char* argv[])
   // for (int i=0; i<13; ++i) x3.get_xi();
 
   unsigned nrays = settings.raysperiteration;
-  unsigned n_power_iterations = settings.npoweriterations;
   float k = 1.0f;
   float oldFissionSource=1.0f;
   float fissionSource=1.0f;
@@ -1256,28 +1298,30 @@ int main(int argc, char* argv[])
   // Set up flux guess
   solver.normalizeFlux();
 
-  // This is the set of phi values and positions which
-  // get recycled at each transport sweep. These could
-  // be randomized.
-  // vector<float> phi_values(nrays);
-  // vector<Pt2D> initial_positions(nrays);
-  // for (unsigned r=0; r<nrays; ++r)
-  // {
-  //     Pt2D point;
-  //     point = random_point(solver.getGeom().assembly_radius);
-  //     float angle = randf() * M_PI * 2.0f;
-  //     phi_values[r] = angle;
-  //     initial_positions[r] = point;
-  // }
-
-  // Loop over scattering iterations
-  for (unsigned n=0; n<n_power_iterations; ++n)
+  // Play cool animation while iterating
+  vector<const char*> symbols = {"  |>-----|",
+                                 "  |->----|",
+                                 "  |-->---|",
+                                 "  |--->--|",
+                                 "  |---->-|",
+                                 "  |----->|",
+                                 "  |-----<|",
+                                 "  |----<-|",
+                                 "  |---<--|",
+                                 "  |--<---|",
+                                 "  |-<----|",
+                                 "  |<-----|"};
+  // Loop over inactive iterations
+  for (unsigned n=0; n<settings.ninactive; ++n)
   {
     solver.scatter();
     oldFissionSource = fissionSource;
     fissionSource = solver.fission(k);
     k *= fissionSource / oldFissionSource;
-    cout << "k = " << k << endl;
+    cout << "\r" << "Inactive iteration (" << setw(5) << n+1 << "/"
+      << setw(5) << settings.ninactive
+      << ") " << "k = " << setprecision(7) << scientific << k
+      << symbols[n % symbols.size()] << flush;
     solver.zeroFlux();
 
     // Loop over all rays
@@ -1285,19 +1329,52 @@ int main(int argc, char* argv[])
     {
       Pt2D point = random_point(solver.getGeom().assembly_radius);
       float angle = randf() * M_PI * 2.0f;
-      // solver.run_ray(initial_positions[i], phi_values[i], i);
       solver.run_ray(point, angle, i);
     }
 
     solver.normalizeByRelativeTraversalDistance();
     solver.multiplyFlux(M_PI * 4.0f); // Done after the fact
     solver.addSourceToScalarFlux();
-
-    // For plotting between iterations:
-    // stringstream x;
-    // x<< "./plotflux.py converge_pics/ray" << n << ".png";
-    // system(x.str().c_str());
   }
+  cout << endl << "Inactive iterations successfully completed." << endl;
+
+  // Loop over active iterations
+  float k_avg = 0.0;
+  float k_sq_avg = 0.0;
+  vector<float> flux_result(solver.getFlux().size());
+  vector<float> flux_uncertainty(solver.getFlux().size());
+  for (unsigned n=0; n < settings.nactive; ++n)
+  {
+    solver.scatter();
+    oldFissionSource = fissionSource;
+    fissionSource = solver.fission(k);
+    k *= fissionSource / oldFissionSource;
+    k_avg = (n * k_avg + k) / (n+1.0f);
+    k_sq_avg = (n * k_sq_avg + k*k) / (n+1.0f);
+    float this_sigma = sqrt(1.0f/(n-1.f) * (k_sq_avg - k_avg*k_avg));
+    float uncert = this_sigma / sqrt(n);
+    cout << "\r" << "Active iteration (" << setw(5) << n+1 << "/"
+      << setw(5) << settings.nactive
+      << ") " << "k = " << setprecision(7) << scientific << k_avg
+      << " +/- " << setprecision(3) << scientific << uncert / k * 100.0f << "%"
+      << symbols[n % symbols.size()] << flush;
+    solver.zeroFlux();
+
+    // Loop over all rays
+    for (unsigned i=0; i<nrays; ++i)
+    {
+      Pt2D point = random_point(solver.getGeom().assembly_radius);
+      float angle = randf() * M_PI * 2.0f;
+      solver.run_ray(point, angle, i);
+    }
+
+    solver.normalizeByRelativeTraversalDistance();
+    solver.multiplyFlux(M_PI * 4.0f); // Done after the fact
+    solver.addSourceToScalarFlux();
+  }
+
+  solver.dumpFluxes("flux.out");
+  solver.dumpFission("fission.out");
 
   FILE *pngout;
   string picFileName = "geometry.png";
