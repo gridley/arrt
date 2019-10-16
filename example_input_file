@@ -1,0 +1,9 @@
+raylength 300.0
+deadlength 50.0
+raysperiteration 1000
+ninactive 100
+nactive 30
+xslibrary xslib10g
+mesh_dimx 108
+ngroups 10
+npolar 1
