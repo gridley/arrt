@@ -29,7 +29,7 @@
 
 // Know npolar at compile time to speed stuff up in core MOC kernel
 // This speedup is due to loop unrolling.
-#define NPOLAR 1
+#define NPOLAR 3
 
 using namespace std;
 namespace fs = experimental::filesystem;
@@ -533,6 +533,8 @@ class Solver2D
     Solver2D(G geom, M materials, RunSettings setts);
     float calcEigenvalue();
 
+    void printPeakingFactors();
+
     /* run a ray starting from this given x0 and phi */
     void run_ray(Pt2D x0, float phi, unsigned ray_id=0);
 
@@ -600,6 +602,58 @@ void Solver2D<G, M, Q>::normalizeFlux()
   }
   transform(fluxes.begin(), fluxes.end(), fluxes.begin(),
       bind(multiplies<float>(), placeholders::_1, 1.0f/sum_flux));
+}
+template <class G, class M, class Q>
+void Solver2D<G, M, Q>::printPeakingFactors()
+{
+  // The assumption here is that the nu value is
+  // pretty much constant throughout the problem
+  float cornerFission, edgeFission;
+  cornerFission = 0.0f;
+  edgeFission = 0.0f;
+  unsigned cellwide = geometry.mesh_dimx / 3;
+    
+  // get corner pin fission rate
+  for (unsigned i=0; i<cellwide; ++i)
+    for (unsigned j=0; j<cellwide; ++j)
+    {
+      unsigned fsr = i*geometry.mesh_dimx + j;
+      string mat_name;              
+      if (geometry.inside_fuel(fsr))                    
+        mat_name = "fuel";
+      else                  
+        mat_name = "mod";       
+      const Material& mat = materialSet.getMaterial(mat_name);
+      if (not mat.fissile) continue;  
+      const vector<float>& fiss = mat.nufiss;
+  
+      for (unsigned g=0; g<ngroups; ++g)
+        cornerFission += fluxes[fsr*ngroups+g]*fiss[g];
+    }
+  
+  // edge pin fission rate
+  for (unsigned i=0; i<cellwide; ++i)
+    for (unsigned j=cellwide; j<2*cellwide; ++j)
+    {
+      unsigned fsr = i*geometry.mesh_dimx + j;
+      string mat_name;          
+      if (geometry.inside_fuel(fsr))   
+        mat_name = "fuel";
+      else                              
+        mat_name = "mod";                   
+      const Material& mat = materialSet.getMaterial(mat_name);
+      if (not mat.fissile) continue;
+      const vector<float>& fiss = mat.nufiss;
+
+      for (unsigned g=0; g<ngroups; ++g)
+        edgeFission += fluxes[fsr*ngroups+g]*fiss[g];
+    }
+
+  // get peaking factors:
+  float avg = (cornerFission + edgeFission)/2.0f;
+  cout << "Corner pin peaking factor is " << cornerFission/avg << endl;
+  cout << "Edge pin peaking factor is " << edgeFission/avg << endl;
+
 }
 template <class G, class M, class Q>
 void Solver2D<G, M, Q>::normalizeByRelativeTraversalDistance()
@@ -1264,6 +1318,7 @@ int main(int argc, char* argv[])
     exit(1);
   }
   string filename = argv[1];
+  srand(1000);
 
   // create solver object. Could do some rvalue reference stuff
   // here, but speed isn't really a concern right here.
@@ -1394,6 +1449,7 @@ int main(int argc, char* argv[])
     flux_sq = 1.0f/(n+1.0f)*((float)n * flux_sq + tmp_flux*tmp_flux);
   }
   cout << endl;
+  solver.printPeakingFactors();
 
   dumpVector(flux_result, "flux.out");
   dumpVector(flux_sq, "fluxsq.out");
